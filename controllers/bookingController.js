@@ -1,0 +1,708 @@
+import HttpError from "../middleware/HttpError.js";
+
+import Service from "../models/Service.js";
+import Booking from "../models/Booking.js";
+import Provider from "../models/Provider.js"
+
+import sendEmail from "../utils/sendEmail.js";
+import {
+ getBookingConfirmationEmailTemplate,
+ getBookingCancelledEmailTemplate,
+ getBookingCompletedEmailTemplate
+} from "../services/emailTemplate.js";
+
+import sendWhatsAppMessage from "../utils/sendWhatsAppMessage.js";
+
+import redisClient from "../config/redis.js";
+
+
+
+// CREATE BOOKING
+// const createBooking = async (req, res, next) => {
+//   try {
+
+//     const { serviceId, providerId, bookingDate, timeSlot, notes } = req.body;
+
+//     const userId = req.user._id;
+
+//     if (!serviceId || !bookingDate || !timeSlot) {
+//       return next(new HttpError("All fields are required", 400));
+//     }
+
+//     const service = await Service.findById(serviceId);
+
+//      if (!service) {
+//       return next(new HttpError("Service not found with the provided ID", 404));
+//     }
+
+//     if (!service.isActive) {
+//       return next(
+//         new HttpError("This service is currently unavailable, Please try again later", 400)
+//       );
+//     }
+
+//     const booking = new Date(bookingDate);
+
+//     const startOfDay = new Date(booking.setHours(0, 0, 0, 0));
+
+//     const endOfDay = new Date(booking.setHours(23, 59, 59, 999));
+
+
+//     const existingBooking = await Booking.findOne({
+//       serviceId,
+//       bookingDate: { $gte: startOfDay, $lt: endOfDay },
+//       timeSlot,
+//       status: { $in: ["pending", "confirmed"] },
+//     });
+
+   
+//    if (existingBooking) {
+//       return next(
+//         new HttpError("This time slot is already booked for the selected service", 409),
+//       );
+//     }
+
+
+//     const newBooking = new Booking({
+//       userId,
+//       providerId,
+//       serviceId,
+//       bookingDate: new Date(bookingDate),
+//       timeSlot,
+//       notes,
+//       totalPrice: service.price,
+//     });
+
+
+//     await newBooking.save();
+
+//     await newBooking.populate([
+//       {
+//         path: "serviceId",
+//         select:"name price duration",
+//       },
+//       {
+//         path:"userId",
+//         select: "name email phone",
+//       },
+//     ]);
+
+//     // await newBooking.populate("serviceId");
+
+//     // await newBooking.populate("userId");
+
+//     await sendEmail({
+//       to: newBooking.userId.email,
+//       subject: "Booking Confirmation",
+//       html: getBookingConfirmationEmailTemplate(
+//          newBooking.userId.name,
+//          newBooking.serviceId.name,
+//          bookingDate,
+//          timeSlot
+//         )
+//     });
+
+//     await sendWhatsAppMessage(
+//       newBooking.userId.phone,
+//       "Your booking has been created successfully."
+//     );
+
+//     res.status(201).json({
+//       success: true,
+//       message: "Booking created successfully",
+//       newBooking,
+//     });
+
+//   } catch (error) {
+//     next(new HttpError(error.message, 500));
+//   }
+// };
+
+// CREATE BOOKING using Redis
+const createBooking = async (req, res, next) => {
+
+  const { serviceId, providerId, bookingDate, timeSlot, notes } = req.body;
+
+  const userId = req.user._id;
+
+  // Generate unique Redis lock key
+  const lockKey = `bookings:${providerId}:${serviceId}:${bookingDate}:${timeSlot}`;
+
+  let lockAcquired = false;
+
+  try {
+
+    // Missing fields
+    if (!serviceId || !providerId || !bookingDate || !timeSlot) {
+      return next(new HttpError("All required fields must be provided", 400));
+    }
+
+    // Date Validation
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+
+    const selectDate = new Date(bookingDate + "T00:00:00");
+    selectDate.setHours(0, 0, 0, 0);
+
+    const maxDate = new Date(today);
+    maxDate.setDate(maxDate.getDate() + 7);
+
+    if (selectDate > maxDate) {
+      return next(new HttpError("Booking allowed only within next 7 days", 400));
+    }
+
+    if (selectDate < today) {
+      return next(new HttpError("Cannot book for past dates", 400));
+    }
+
+    // Time Validation
+    const now = new Date();
+
+    if (selectDate.getTime() === today.getTime()) {
+
+      const [startTime] = timeSlot.split("-");
+      const [hours, minutes] = startTime.trim().split(":").map(Number);
+
+      if (isNaN(hours) || isNaN(minutes)) {
+        return next(new HttpError("Invalid time format", 400));
+      }
+
+      const slotDateAndTime = new Date(selectDate);
+      slotDateAndTime.setHours(hours, minutes, 0, 0);
+
+      if (slotDateAndTime < now) {
+        return next(new HttpError("Cannot book past time slots", 400));
+      }
+    }
+
+    // Redis Lock
+    const lock = await redisClient.set(lockKey, userId.toString(), {
+      NX: true,
+      EX: 10,
+    });
+
+    if (!lock) {
+      return next(new HttpError("This time slot is already being booked, please try again", 409));
+    }
+
+    lockAcquired = true;
+
+    // Service Validation
+    const service = await Service.findById(serviceId);
+
+    if (!service) {
+      return next(new HttpError("Service not found", 404));
+    }
+
+    if (!service.isActive) {
+      return next(new HttpError("Service is currently inactive", 403));
+    }
+
+    // Provider Validation
+    const provider = await Provider.findById(providerId);
+
+    if (!provider) {
+      return next(new HttpError("Provider not found", 404));
+    }
+
+    // Booking Conflict Check
+    const startOfDay = new Date(bookingDate);
+    startOfDay.setHours(0, 0, 0, 0);
+
+    const endOfDay = new Date(bookingDate);
+    endOfDay.setHours(23, 59, 59, 999);
+
+    const existingBooking = await Booking.findOne({
+      serviceId,
+      providerId,
+      bookingDate: { $gte: startOfDay, $lt: endOfDay },
+      timeSlot,
+      status: { $in: ["pending", "confirmed"] },
+    });
+
+    if (existingBooking) {
+      return next(new HttpError("This time slot is already booked", 409));
+    }
+
+    // Create Booking
+    const newBooking = new Booking({
+      userId,
+      serviceId,
+      providerId,
+      bookingDate: new Date(bookingDate),
+      timeSlot,
+      notes,
+      totalPrice: service.price,
+    });
+
+    await newBooking.save();
+
+    await newBooking.populate([
+      {
+        path: "serviceId",
+        select: "name price duration -_id",
+      },
+      {
+        path: "userId",
+        select: "name email phone",
+      },
+      {
+        path: "providerId",
+        select: "name",
+      },
+    ]);
+
+  
+   await sendWhatsAppMessage(
+      newBooking.userId.phone,
+      "Booking has been created successfully"
+    );
+
+    res.status(201).json({
+      success: true,
+      message: "Booking confirmed successfully",
+      newBooking,
+    });
+
+  } catch (error) {
+    next(new HttpError(error.message, 500));
+  } 
+  finally {
+    if (lockAcquired) {
+      await redisClient.del(lockKey);
+    }
+  }
+};
+
+
+
+// GET ALL BOOKINGS
+const getAllBooking = async (req, res, next) => {
+  try {
+
+    let bookings;
+    let Role = req.user.role;
+
+    if (Role === "admin" || Role === "super_admin") {
+      bookings = await Booking.find({}).populate([
+        {
+          path: "serviceId",
+          select: "name price duration",
+        },
+        {
+          path: "userId",
+          select: "name email phone",
+        },
+      ]);
+    }
+    else if (Role === "customer") {
+      bookings = await Booking.find({ userId: req.user._id }).populate([
+        {
+          path: "serviceId",
+          select: "name price duration",
+        },
+        {
+          path: "userId",
+          select: "name email phone",
+        },
+      ]);
+    }
+    else {
+      return next(new HttpError("You are not authorized to access booking data", 401));
+    }
+
+    if (bookings.length === 0) {
+      return res.status(200).json({
+        success: true,
+        message: "No bookings available",
+      });
+    }
+
+    res.status(200).json({
+      success: true,
+      message: "Bookings retrieved successfully",
+      bookings,
+    });
+
+  } catch (error) {
+    next(new HttpError(error.message, 500));
+  }
+};
+
+
+// GET ALL BOOKING BY SERVICE ID
+const getAllService = async (req, res, next) => {
+  try {
+
+    let bookings;
+    let Role = req.user.role;
+    const serviceId = req.params.id;
+
+    if (Role === "admin" || Role === "super_admin") {
+      bookings = await Booking.find({  })
+        .populate([
+          {
+            path: "serviceId",
+            select: "name price duration description",
+          },
+          {
+            path: "userId",
+            select: "name email phone",
+          },
+        ]);
+    } 
+    
+    else if (Role === "customer") {
+      bookings = await Booking.find({
+        userId: req.user._id,
+        serviceId: serviceId,
+      })
+        .populate("serviceId", "name price duration description");
+    } 
+    
+   else {
+      return next(new HttpError("You are not authorized to access this resource", 401));
+    }
+
+    if (bookings.length === 0) {
+      return res.status(200).json({
+        success: true,
+        message: "No bookings found for this service",
+      });
+    }
+
+    res.status(200).json({
+      success: true,
+      message:  "Service bookings retrieved successfully",
+      bookings,
+    });
+
+  } catch (error) {
+    next(new HttpError(error.message, 500));
+  }
+};
+
+
+
+// GET BOOKING BY ID
+const getBookingById = async (req, res, next) => {
+  try {
+    const bookingId = req.params.id;
+
+    const booking = await Booking.findById(bookingId).populate([
+      {
+        path: "serviceId",
+        select: "name price duration description",
+      },
+      {
+        path: "userId",
+        select: "name email phone",
+      },
+    ]);
+
+    if (!booking) {
+      return next(new HttpError("Booking not found with the provided ID", 404));
+    }
+
+    if (
+      req.user.role === "customer" &&
+      booking.userId._id.toString() !== req.user._id.toString()
+    ) {
+      return next(new HttpError("You are not allowed to access this booking", 401));
+    }
+
+    res.status(200).json({
+      success: true,
+      message: "Booking details retrieved successfully",
+      booking,
+    });
+
+  } catch (error) {
+    next(new HttpError(error.message, 500));
+  }
+};
+
+
+// GET BOOKINGS (Admin → any user | Customer → own only)
+const getBookingsByUserId = async (req, res, next) => {
+  try {
+
+    const requestedUserId = req.params.id || req.user._id;
+
+    let bookings;
+
+    bookings = await Booking.find({ userId: requestedUserId });
+
+    if (!bookings.length) {
+      return next(new HttpError("No bookings found for this user", 404));
+    }
+
+    res.status(200).json({
+      success: true,
+      message: "User bookings retrieved successfully",
+      bookings,
+    });
+
+  } catch (error) {
+    next(new HttpError(error.message, 500));
+  }
+};
+
+// const getBookingsByUserId = async (req, res, next) => {
+//   try{
+    
+//     let booking;
+
+//     let loginUser = req.user._id;
+
+//     let userId = req.params.id;
+
+//     if (loginUser) {
+//       booking = await Booking.find({ userId: loginUser });
+//     }
+
+//     if (userId) {
+//       booking = await Booking.find({ userId });
+//     }
+
+//     if (!booking.length) {
+//       return next(new HttpError("No booking data found", 404))
+//     }
+
+//     res.status(200).json({
+//       success: true,
+//       message: "Booking data fetched successfully",
+//       booking,
+//     })
+//   }catch(error){
+//     next(new HttpError(error.message, 500));
+//   }
+// };
+
+
+
+// AVAILABLE TIME SLOTS
+const availableTimeSlots = async (req, res, next) => {
+
+ try{
+
+   const { serviceId, bookingDate } = req.query
+
+    const service = await Service.findById(serviceId)
+
+    if (!service) {
+      return next(new HttpError("Service not found with the provided ID", 404));
+    }
+
+    const startOfDay = new Date(bookingDate);
+    startOfDay.setHours(0, 0, 0, 0);
+
+    const endOfDay = new Date(bookingDate);
+    endOfDay.setHours(23, 59, 59, 999);
+
+
+    const bookings = await Booking.find({
+      serviceId,
+      bookingDate: {
+        $gte: startOfDay,
+        $lte: endOfDay,
+      },
+      status: { 
+        $in: ["pending", "confirmed"] 
+      },
+    });
+
+    const bookedSlots = bookings.map((b) => b.timeSlot);
+
+    const allTimeSlots = [
+        "09:00 AM - 10:00 AM",
+        "10:00 AM - 11:00 AM",
+        "11:00 AM - 12:00 PM",
+        "12:00 PM - 01:00 PM",
+        "02:00 PM - 03:00 PM",
+        "03:00 PM - 04:00 PM",
+        "04:00 PM - 05:00 PM",
+        "05:00 PM - 06:00 PM"
+      ]
+
+    const availableTimeSlots = allTimeSlots.filter(
+      (slot) => !bookedSlots.includes(slot));
+
+    
+    res.status(200).json({
+      success: true,
+      message: availableTimeSlots.length
+        ? "Available time slots retrieved successfully"
+        : "No time slots available for the selected date",
+      availableTimeSlots,
+    });
+  } catch (error) {
+    next(new HttpError(error.message, 500));
+  }
+};
+
+
+// CONFIRM BOOKING
+const confirmBookingStatus = async (req, res, next) => {
+  try{
+
+    const id = req.params.id;
+
+    const booking = await Booking.findById(id);
+
+    if (!booking) {
+      return next(new HttpError("Booking not found",404));
+    }
+
+    if (booking.status === "confirmed") {
+      return next(new HttpError("This booking is already confirmed",404));
+    }
+
+    if (booking.status === "cancelled"){
+      return next(new HttpError("Cancelled bookings cannot be confirmed", 400));
+    }
+
+    booking.status = "confirmed";
+
+    await booking.save();
+
+    await sendWhatsAppMessage(
+      booking.userId.phone,
+      "Your booking has been confirmed."
+    );
+
+    res.status(200).json({
+      success: true,
+      message:"Booking confirmed successfully",
+      booking,
+    });
+
+    
+  }catch(error){
+    next(new HttpError(error.message, 500));
+  }
+}
+
+
+
+// CANCEL BOOKING
+const cancelBookingStatus = async (req, res, next) => {
+  try {
+
+    const id = req.params.id;
+
+    const booking = await Booking.findById(id)
+      .populate("userId","name email phone")
+      .populate("serviceId","name");
+
+    if (!booking) {
+      return next(new HttpError("Booking not found", 404));
+    }
+
+    if (booking.status === "cancelled") {
+      return next(new HttpError("This booking is already cancelled", 400));
+    }
+
+
+    if (booking.status === "completed") {
+      return next(new HttpError("Completed bookings cannot be cancelled", 400));
+
+    }
+
+    booking.status = "cancelled";
+
+    await booking.save();
+
+    await sendEmail({
+      to: booking.userId.email,
+      subject: "Booking Cancelled",
+      html: getBookingCancelledEmailTemplate(
+        booking.userId.name,
+        booking.serviceId.name
+      )
+    });
+
+
+    await sendWhatsAppMessage(
+      booking.userId.phone,
+      "Your booking has been cancelled."
+    );
+
+    res.status(200).json({
+      success: true,
+      message: "Booking cancelled successfully",
+      booking,
+    });
+
+
+  } catch (error) {
+    next(new HttpError(error.message, 500));
+  }
+}
+
+
+// COMPLETE BOOKING
+const completeBookingStatus = async (req, res, next) => {
+
+  try {
+
+    const id = req.params.id
+
+    const booking = await Booking.findById(id)
+      .populate("userId","name email")
+      .populate("serviceId","name");
+
+    if (!booking) {
+      return next(new HttpError("Booking not found", 404));
+    }
+
+    if (booking.status === "completed") {
+      return next(new HttpError("This booking is already completed", 400))
+    }
+
+    if (booking.status === "cancelled") {
+
+      return next(new HttpError("Cancelled bookings cannot be completed", 400))
+
+    }
+
+    booking.status = "completed";
+
+    await booking.save();
+
+    await sendEmail({
+      to: booking.userId.email,
+      subject: "Service Completed",
+      html: getBookingCompletedEmailTemplate(
+        booking.userId.name,
+        booking.serviceId.name
+      )
+    });
+
+    res.status(200).json({
+      success: true,
+      message: "Booking marked as completed successfully",
+      booking,
+    });
+
+  } catch (error) {
+    next(new HttpError(error.message, 500));
+  }
+
+}
+
+
+
+export default {
+  createBooking,
+  getAllBooking,
+  getAllService,
+  getBookingById, 
+  getBookingsByUserId,
+  availableTimeSlots,
+  confirmBookingStatus,
+  cancelBookingStatus,
+  completeBookingStatus,
+
+};
+
