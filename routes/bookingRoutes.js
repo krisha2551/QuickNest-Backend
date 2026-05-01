@@ -1,7 +1,12 @@
 import express from "express";
+
 import bookingController from "../controllers/bookingController.js";
+
 import auth from "../middleware/auth.js";
 import checkRole from "../middleware/checkRole.js";
+import validate from "../middleware/validate.js";
+
+import { createBookingSchema }  from "../validation/bookingSchema.js";
 
 const router = express.Router();
 
@@ -10,6 +15,7 @@ const router = express.Router();
 router.post(
   "/create",
   auth,
+  validate(createBookingSchema),
   bookingController.createBooking
 );
 
