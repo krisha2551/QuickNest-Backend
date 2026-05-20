@@ -165,7 +165,7 @@ This backend supports **Admin, Provider, and User roles** with secure JWT authen
 ## 🌐 Live API Base URL
 
 ```bash
-https://your-render-link.onrender.com
+https://quicknest-backend-f9hx.onrender.com
 ```
 
 Postman Environment Variable:
@@ -336,7 +336,7 @@ All APIs tested using **Postman**.
 Postman Variables:
 
 ```bash
-baseUrl = https://your-render-link.onrender.com
+baseUrl = https://quicknest-backend-f9hx.onrender.com
 AuthToken = your_jwt_token
 ```
 
