@@ -118,6 +118,8 @@ import redisClient from "../config/redis.js";
 //   }
 // };
 
+
+
 // CREATE BOOKING using Redis
 const createBooking = async (req, res, next) => {
 
@@ -141,7 +143,7 @@ const createBooking = async (req, res, next) => {
     const today = new Date();
     today.setHours(0, 0, 0, 0);
 
-    const selectDate = new Date(bookingDate + "T00:00:00");
+    const selectDate = new Date(bookingDate);
     selectDate.setHours(0, 0, 0, 0);
 
     const maxDate = new Date(today);
@@ -448,6 +450,7 @@ const getBookingsByUserId = async (req, res, next) => {
   }
 };
 
+
 // const getBookingsByUserId = async (req, res, next) => {
 //   try{
     
@@ -542,6 +545,7 @@ const availableTimeSlots = async (req, res, next) => {
 };
 
 
+
 // CONFIRM BOOKING
 const confirmBookingStatus = async (req, res, next) => {
   try{
@@ -582,7 +586,6 @@ const confirmBookingStatus = async (req, res, next) => {
     next(new HttpError(error.message, 500));
   }
 }
-
 
 
 // CANCEL BOOKING

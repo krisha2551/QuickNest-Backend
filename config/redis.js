@@ -1,18 +1,14 @@
-import { createClient } from "redis";
+import { Redis } from "@upstash/redis";
 
-const redisClient = createClient({
-  url: "redis://localhost:6379",
+const redis = new Redis({
+  url: "https://sterling-goose-71941.upstash.io",
+  token: "gQAAAAAAARkFAAIgcDE3NmFlNWExODQ2Y2Y0YzdhOGUyMDc0NDIxY2I4Yzk3Zg",
 });
 
-// Error handler
-redisClient.on("error", (err) => {
-  console.error("❌ Redis Error:", err.message);
-});
-
-// Connect function
+// Optional test connection
 const connectRedis = async () => {
   try {
-    await redisClient.connect();
+    await redis.set("test", "connected");
     console.log("✅ Redis Connected");
   } catch (err) {
     console.error("❌ Redis Connection Failed:", err.message);
@@ -22,4 +18,4 @@ const connectRedis = async () => {
 
 connectRedis();
 
-export default redisClient;
+export default redis;

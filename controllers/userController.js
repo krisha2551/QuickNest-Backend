@@ -39,7 +39,8 @@ const add = async (req, res, next) => {
 
     res.status(201).json({ 
       success: true, 
-      user });
+      user 
+    });
   } catch (error) {
     next(new HttpError(error.message, 500));
   }
@@ -142,7 +143,10 @@ const allUser = async (req, res, next) => {
       sortByValue[field] = order === "desc" ? -1 : 1;
     }
 
-    const users = await User.find(query).limit(parseInt(limit) || 5).skip(parseInt(skip) || 0).sort(sortByValue);
+    const users = await User.find(query)
+      .limit(parseInt(limit) || 5)
+      .skip(parseInt(skip) || 0)
+      .sort(sortByValue);
 
     if (users.length === 0) {
       return res
@@ -153,6 +157,7 @@ const allUser = async (req, res, next) => {
     res.status(200).json({
       success: true,
       message: "all user data fetched",
+      length: users.length,
       users,
     });
   } catch (error) {
@@ -164,14 +169,22 @@ const allUser = async (req, res, next) => {
 // UPDATE 
 const update = async (req, res, next) => {
   try {
-    const user = req.user;
+
+    let targetedUser = req.params.id || req.user._id;
+
+    const user = await User.findById(targetedUser);
 
     if (!user) {
       return next(new HttpError("user not found", 404));
     }
 
     const updates = Object.keys(req.body);
-    const allowedFields = ["name", "password", "phone"];
+
+    let allowedFields = ["name", "password", "phone", "profilePic"];
+
+    if (req.user.role === "admin" || req.user.role === "super_admin") {
+      allowedFields = [...allowedFields, "role", "isVerified"];
+    }
 
     const isValid = updates.every((field) =>
       allowedFields.includes(field)
@@ -183,6 +196,16 @@ const update = async (req, res, next) => {
       );
     }
 
+    if (
+      !req.user.role === "admin" &&
+      !req.user.role === "super_admin" &&
+      !req.user._id.toString() !== user._id.toString()
+    ) {
+      return next(new HttpError("unauthorized access", 401));
+    }
+
+    updates.forEach((update) => (user[update] = req.body[update]));
+
   
     if (req.file) {
       if (user.cloudinaryId) {
@@ -193,9 +216,7 @@ const update = async (req, res, next) => {
       user.cloudinaryId = req.file.filename;
     }
 
-    updates.forEach((update) => {
-      user[update] = req.body[update];
-    });
+
 
     await user.save();
 
@@ -213,9 +234,25 @@ const update = async (req, res, next) => {
 // DELETE 
 const deleteUser = async (req, res, next) => {
   try {
-    const user = req.user;
+
+    const targetedUser = req.params.id || req.user._id;
+
+    const user = await User.findById(targetedUser);
 
     
+    if (!user) {
+      return next(new HttpError("user not found"), 401);
+    }
+
+    if (
+      !req.user.role === "admin" &&
+      !req.user.role === "super_admin" &&
+      !req.user._id.toString() !== user._id.toString()
+    ) {
+      return next(new HttpError("unauthorized access", 401));
+    }
+
+
     if (user.cloudinaryId) {
       await cloudinary.uploader.destroy(user.cloudinaryId);
     }
